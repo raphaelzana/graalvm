@@ -1,35 +1,45 @@
-### BUILD image
-FROM maven:3-jdk-8 as builder
-# create app folder for sources
-RUN mkdir -p /build
-WORKDIR /build
-COPY pom.xml /build
-#Download all required dependencies into one layer
-RUN mvn -B dependency:resolve dependency:resolve-plugins
-#Copy source code
-COPY src /build/src
-# Build application
-RUN mvn clean package
+FROM ghcr.io/graalvm/native-image:ol8-java17-22 AS builder
 
+# Install tar and gzip to extract the Maven binaries
+RUN microdnf update \
+ && microdnf install --nodocs \
+    tar \
+    gzip \
+ && microdnf clean all \
+ && rm -rf /var/cache/yum
 
-FROM ghcr.io/graalvm/graalvm-ce:ol7-java11-22.3.0 as nativer
+# Install Maven
+# Source:
+# 1) https://github.com/carlossg/docker-maven/blob/925e49a1d0986070208e3c06a11c41f8f2cada82/openjdk-17/Dockerfile
+# 2) https://maven.apache.org/download.cgi
+ARG USER_HOME_DIR="/root"
+#ARG SHA=89ab8ece99292476447ef6a6800d9842bbb60787b9b8a45c103aa61d2f205a971d8c3ddfb8b03e514455b4173602bd015e82958c0b3ddc1728a57126f773c743
+ARG MAVEN_DOWNLOAD_URL=https://dlcdn.apache.org/maven/maven-3/3.8.6/binaries/apache-maven-3.8.6-bin.tar.gz
+
+RUN mkdir -p /usr/share/maven /usr/share/maven/ref \
+  && curl -fsSL -o /tmp/apache-maven.tar.gz ${MAVEN_DOWNLOAD_URL} \
+#  && echo "${SHA}  /tmp/apache-maven.tar.gz" | sha512sum -c - \
+  && tar -xzf /tmp/apache-maven.tar.gz -C /usr/share/maven --strip-components=1 \
+  && rm -f /tmp/apache-maven.tar.gz \
+  && ln -s /usr/share/maven/bin/mvn /usr/bin/mvn
+
+ENV MAVEN_HOME /usr/share/maven
+ENV MAVEN_CONFIG "$USER_HOME_DIR/.m2"
 
 # Set the working directory to /home/app
 WORKDIR /build
 
-COPY --from=builder "/build/target/*" /build
+# Copy the source code into the image for building
+COPY . /build
 
-RUN gu install native-image && native-image -jar spring-boot-rest-example-0.0.1-SNAPSHOT.jar spring-boot-graal
+# Build
+RUN mvn -Pnative native:compile
 
-
-
-
-FROM ghcr.io/graalvm/graalvm-ce:ol7-java11-22.3.0 as runner
+# The deployment Image
+FROM docker.io/oraclelinux:8-slim
 
 EXPOSE 8080
 
-# Add Spring Boot Native app spring-boot-graal to Container
-COPY --from=nativer "/build/*" .
-
-# Fire up our Spring Boot Native app by default
-CMD ./spring-boot-graal
+# Copy the native executable into the containers
+COPY --from=builder /build/target/spring-boot-rest-example .
+CMD ./spring-boot-rest-example
